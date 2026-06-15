@@ -104,9 +104,30 @@
 
     .manual-controls {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 8px;
       align-items: center;
+    }
+
+    .api-key-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 46px;
+      border: 1px solid var(--artifact-border-light);
+      border-radius: 999px;
+      background: var(--artifact-input-background);
+      color: var(--artifact-text-primary);
+      padding: 0 14px;
+    }
+
+    .api-key-input {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: var(--artifact-text-primary);
+      font-size: 14px;
+      padding: 0;
     }
 
     .rate-input-wrap {
@@ -159,6 +180,18 @@
 
     button:active { transform: translateY(0); }
 
+    button.secondary {
+      background: var(--artifact-background-mid);
+      color: var(--artifact-text-primary);
+      border: 1px solid var(--artifact-border-light);
+    }
+
+    button:disabled {
+      opacity: 0.56;
+      cursor: not-allowed;
+      transform: none;
+    }
+
     button:focus-visible, input:focus-visible {
       outline: none;
       box-shadow: var(--artifact-focus-shadow);
@@ -184,9 +217,7 @@
       animation: previewDrop 0.22s ease both;
     }
 
-    body.is-typing .focus-preview {
-      display: flex;
-    }
+    body.is-typing .focus-preview { display: flex; }
 
     .focus-preview-label {
       font-size: 12px;
@@ -468,7 +499,9 @@
           <span class="rate-suffix">KRW</span>
         </label>
         <button id="applyManualBtn" type="button">Apply rate</button>
+        <button class="secondary" id="updateLiveBtn" type="button">Update live</button>
       </div>
+      <input id="rapidApiKeyInput" type="hidden" value="58b56fe0cbmsh240ace10c4a5810p11681ejsn36c2eea83714" />
       <div class="message" id="messageBox" role="status" aria-live="polite"></div>
     </section>
 
@@ -517,11 +550,13 @@
   </main>
 
   <script>
-    const STORAGE_KEY = "cny-krw-travel-converter-manual-v2";
+    const STORAGE_KEY = "cny-krw-travel-converter-api-v1";
     const DEFAULT_RATE = 224;
+    const RAPIDAPI_HOST = "currency-conversion-and-exchange-rates.p.rapidapi.com";
 
     const state = {
       rate: DEFAULT_RATE,
+      mode: "manual",
       updatedAt: null,
       lastEdited: "KRW"
     };
@@ -532,6 +567,8 @@
     const updatedText = document.getElementById("updatedText");
     const manualRateInput = document.getElementById("manualRateInput");
     const applyManualBtn = document.getElementById("applyManualBtn");
+    const updateLiveBtn = document.getElementById("updateLiveBtn");
+    const rapidApiKeyInput = document.getElementById("rapidApiKeyInput");
     const messageBox = document.getElementById("messageBox");
     const focusPreviewLabel = document.getElementById("focusPreviewLabel");
     const focusPreviewValue = document.getElementById("focusPreviewValue");
@@ -574,7 +611,9 @@
     function saveState() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         rate: state.rate,
-        updatedAt: state.updatedAt
+        mode: state.mode,
+        updatedAt: state.updatedAt,
+        rapidApiKey: rapidApiKeyInput ? rapidApiKeyInput.value.trim() : ""
       }));
     }
 
@@ -586,7 +625,9 @@
         const savedRate = Number(saved && saved.rate);
         if (!Number.isFinite(savedRate) || savedRate <= 0) return false;
         state.rate = savedRate;
+        state.mode = saved.mode === "live" ? "live" : "manual";
         state.updatedAt = saved.updatedAt || null;
+        if (saved.rapidApiKey && rapidApiKeyInput) rapidApiKeyInput.value = saved.rapidApiKey;
         return true;
       } catch (error) {
         return false;
@@ -605,6 +646,7 @@
 
     function updateStatus() {
       rateValue.textContent = `1 CNY = ${formatRate(state.rate)} KRW`;
+      modeBadge.textContent = state.mode === "live" ? "Live" : "Manual";
       updatedText.textContent = `${state.updatedAt ? "Updated" : "Using"} ${formatTime(state.updatedAt)}`;
       manualRateInput.value = state.rate ? String(Math.round(state.rate * 10000) / 10000) : "";
     }
@@ -668,11 +710,81 @@
         return;
       }
       state.rate = manualRate;
+      state.mode = "manual";
       state.updatedAt = new Date().toISOString();
       saveState();
       updateStatus();
       recalculate();
       setMessage("Manual rate applied and saved in this browser.");
+    }
+
+    function parseApiRate(data, amount) {
+      const infoRate = Number(data && data.info && data.info.rate);
+      if (Number.isFinite(infoRate) && infoRate > 0) return infoRate;
+
+      const result = Number(data && data.result);
+      const numericAmount = Number(amount);
+      if (Number.isFinite(result) && result > 0 && Number.isFinite(numericAmount) && numericAmount > 0) {
+        return result / numericAmount;
+      }
+
+      return null;
+    }
+
+    async function updateLiveRate() {
+      const apiKey = rapidApiKeyInput.value.trim();
+      if (!apiKey) {
+        setMessage("Paste your RapidAPI key once, then tap Update live.", "error");
+        rapidApiKeyInput.focus();
+        return;
+      }
+
+      const amount = "1";
+      const url = `https://${RAPIDAPI_HOST}/convert?from=CNY&to=KRW&amount=${amount}`;
+
+      updateLiveBtn.disabled = true;
+      updateLiveBtn.textContent = "Updating…";
+      setMessage("Checking live CNY/KRW rate…");
+
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "x-rapidapi-host": RAPIDAPI_HOST,
+            "x-rapidapi-key": apiKey
+          }
+        });
+
+        const text = await response.text();
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch (error) {
+          throw new Error(`API returned non-JSON response: ${text.slice(0, 80)}`);
+        }
+
+        if (!response.ok || !data || data.success !== true) {
+          const message = data && (data.message || (data.error && (data.error.info || data.error.message)));
+          throw new Error(message || `HTTP ${response.status}`);
+        }
+
+        const liveRate = parseApiRate(data, amount);
+        if (!liveRate) throw new Error("API response did not include data.info.rate or usable data.result.");
+
+        state.rate = liveRate;
+        state.mode = "live";
+        state.updatedAt = new Date().toISOString();
+        saveState();
+        updateStatus();
+        recalculate();
+        setMessage(`Live rate updated: 1 CNY = ${formatRate(liveRate)} KRW.`);
+      } catch (error) {
+        setMessage(`Live update failed: ${error.message}. Manual rate is still available.`, "error");
+      } finally {
+        updateLiveBtn.disabled = false;
+        updateLiveBtn.textContent = "Update live";
+      }
     }
 
     cnyInput.addEventListener("input", () => {
@@ -687,7 +799,7 @@
       updateFocusPreview();
     });
 
-    [krwInput, cnyInput, manualRateInput].forEach((input) => {
+    [krwInput, cnyInput, manualRateInput, rapidApiKeyInput].forEach((input) => {
       input.addEventListener("focus", () => enterTypingMode(input));
       input.addEventListener("blur", leaveTypingMode);
     });
@@ -697,6 +809,8 @@
     });
 
     applyManualBtn.addEventListener("click", applyManualRate);
+    updateLiveBtn.addEventListener("click", updateLiveRate);
+    rapidApiKeyInput.addEventListener("change", saveState);
 
     document.querySelectorAll(".quick-chip").forEach((chip) => {
       chip.addEventListener("click", () => {
